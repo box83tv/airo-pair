@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AiroTV – Ajouter une playlist</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0E0F14;color:#fff;margin:0;padding:24px;max-width:480px}
+input,select{width:100%;box-sizing:border-box;padding:12px;margin:6px 0 14px;border-radius:10px;border:1px solid #2B2E3A;background:#1C1E27;color:#fff;font-size:16px}
+button{width:100%;padding:14px;border:0;border-radius:10px;background:#7C5CFF;color:#fff;font-size:16px}
+p{color:#8A8FA3}a{color:#9D86FF}
+</style></head><body>
+<h2>Ajouter une playlist</h2>
+<p>Les données sont chiffrées sur ce téléphone avant l'envoi : seule ta TV peut les lire.</p>
+<form id="f">
+<div id="codebox" style="display:none"><label>Code affiché sur la TV</label><input id="code" inputmode="numeric" placeholder="123 456 7890" autocomplete="off" maxlength="14"></div>
+<label>Nom de la playlist</label><input id="name" placeholder="Ma playlist" maxlength="30" autocomplete="off">
+<label>Type</label>
+<select id="type"><option value="m3u">Lien M3U</option><option value="xtream">Xtream Codes</option></select>
+<div id="m3u"><label>Lien de la playlist</label><input id="m3uurl" type="url" placeholder="https://exemple.com/playlist.m3u"></div>
+<div id="xtream" style="display:none">
+<label>Serveur</label><input id="server" placeholder="http://exemple.com:8080">
+<label>Nom d'utilisateur</label><input id="user" autocapitalize="off" autocomplete="off">
+<label>Mot de passe</label><input id="pass" type="password" autocomplete="off">
+</div>
+<button type="submit" id="go">Envoyer à la TV</button>
+</form>
+<p id="msg"></p>
+<script>
+const RELAY="https://ntfy.sh";
+const $=id=>document.getElementById(id);
+const h=new URLSearchParams(location.hash.slice(1));
+const topic=h.get("t"), k=h.get("k");
+const msg=t=>$("msg").textContent=t;
+// Sans lien de QR code : on saisit le code à 10 chiffres affiché sur la TV
+const useCode=!topic||!k;
+if(useCode)$("codebox").style.display="block";
+$("type").onchange=()=>{const x=$("type").value=="xtream";$("m3u").style.display=x?"none":"block";$("xtream").style.display=x?"block":"none";};
+const b64=u8=>btoa(String.fromCharCode(...u8));
+// Même dérivation que la TV : PBKDF2 (SHA-1, 50 000 tours) -> 32 octets de clé AES + 16 octets pour le nom du topic
+async function derive(code){
+  const te=new TextEncoder();
+  const base=await crypto.subtle.importKey("raw",te.encode(code),"PBKDF2",false,["deriveBits"]);
+  const bits=new Uint8Array(await crypto.subtle.deriveBits({name:"PBKDF2",hash:"SHA-1",salt:te.encode("AiroTV-pair-v1"),iterations:50000},base,384));
+  return {raw:bits.slice(0,32),topic:"airo-c-"+Array.from(bits.slice(32,48),b=>b.toString(16).padStart(2,"0")).join("")};
+}
+async function encrypt(obj,raw){
+  const key=await crypto.subtle.importKey("raw",raw,"AES-GCM",false,["encrypt"]);
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(JSON.stringify(obj))));
+  const out=new Uint8Array(12+ct.length);out.set(iv);out.set(ct,12);return b64(out);
+}
+$("f").onsubmit=async e=>{
+  e.preventDefault();
+  const type=$("type").value;
+  const data={name:$("name").value.trim(),type,m3u:$("m3uurl").value,server:$("server").value,user:$("user").value,pass:$("pass").value};
+  if(type=="m3u"?!/^https?:\/\//i.test(data.m3u.trim()):(!data.server||!data.user||!data.pass)){msg("Vérifie les informations saisies.");return;}
+  let raw,tp=topic;
+  if(useCode){
+    const code=$("code").value.replace(/\D/g,"");
+    if(code.length!=10){msg("Saisis les 10 chiffres du code affiché sur la TV.");return;}
+    $("go").disabled=true;msg("Calcul…");
+    const d=await derive(code);raw=d.raw;tp=d.topic;
+  }else{
+    raw=Uint8Array.from(atob(k.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
+  }
+  $("go").disabled=true;msg("Envoi…");
+  try{
+    const r=await fetch(RELAY+"/"+encodeURIComponent(tp),{method:"POST",headers:{"Content-Type":"text/plain"},body:await encrypt(data,raw)});
+    if(!r.ok)throw 0;
+    msg(useCode?"✅ Envoyé. Confirme l'ajout sur la TV, puis tu peux fermer cette page.":"✅ Envoyé à la TV. Tu peux fermer cette page.");
+  }catch(_){msg("Échec de l'envoi, réessaie.");$("go").disabled=false;}
+};
+</script></body></html>
